@@ -35,7 +35,7 @@ public class SteamQueryConfig
     public string ProxyUrl { get; set; } = "";
 
     [DisplayName("网络·缓存时长(秒)")]
-    [Description("同一个网址在这个时长内重复查直接用缓存，0=每次真查。查磨损档这种一次发六条的能省不少")]
+    [Description("同一个网址在这个时长内重复查直接用缓存，0=每次真查。查磨损档这种一次发六条的能省不少；最长能填到一天（86400）")]
     public int CacheTtlSeconds { get; set; } = 300;
 
     [DisplayName("凭据·Steam Web API Key")]
@@ -115,7 +115,7 @@ public class SteamQueryModule(
         }
         string languagePart = reviewLanguage.Length > 0 ? "language=" + reviewLanguage + "&" : "";
         string url = StoreBase + "/appreviews/" + resolvedId + "?json=1&" + languagePart
-            + "filter=recent&num_per_page=" + reviewCount + "&purchase_type=all&query_summary=1&client_id=" + Guid.NewGuid().ToString("N")[..8];
+            + "filter=recent&num_per_page=" + reviewCount + "&purchase_type=all&query_summary=1";
 
         try
         {
@@ -201,7 +201,11 @@ public class SteamQueryModule(
                 string price = "免费/未知";
                 if (data.TryGetProperty("price_overview", out JsonElement priceElement) && priceElement.ValueKind == JsonValueKind.Object)
                 {
-                    price = GetStringField(priceElement, "final_formatted");
+                    price = FormatPrice(priceElement);
+                }
+                else if (GetBoolField(data, "is_free"))
+                {
+                    price = "免费";
                 }
                 rep.Add("== " + GetStringField(data, "name") + " (" + id + ") ==");
                 rep.Add("发行: " + GetReleaseDate(data) + " | 价格: " + price
@@ -225,7 +229,7 @@ public class SteamQueryModule(
     }
 
     [XmlFunction(FunctionMode.OneShot)]
-    [Description("按关键词搜索Steam商店游戏（拿appid），返回：appid | 名称 | 价格 | 链接。搜不到时可换中英文名分别试")]
+    [Description("按关键词搜索Steam商店游戏（拿appid），返回：appid | 名称 | 价格 | 链接。实测这个接口只回分单位的价格数字，插件按 currency 换算成 ¥298.00 这样；没有 price 键的就是免费游戏。搜不到时可换中英文名分别试")]
     public async Task SteamSearch(
         [Description("游戏名称关键词")] string keyword,
         [Description("返回条数，默认10，最多20")] int count = 10)
@@ -257,10 +261,10 @@ public class SteamQueryModule(
             List<string> rep = new();
             foreach (JsonElement item in items.EnumerateArray().Take(Math.Clamp(count, 1, 20)))
             {
-                string price = "免费/未知";
+                string price = "无价格字段（实测免费游戏就是这样）";
                 if (item.TryGetProperty("price", out JsonElement priceElement) && priceElement.ValueKind == JsonValueKind.Object)
                 {
-                    price = GetStringField(priceElement, "final_formatted");
+                    price = FormatPrice(priceElement);
                 }
                 rep.Add(GetStringField(item, "id") + " | " + GetStringField(item, "name") + " | " + price
                     + " | " + StoreBase + "/app/" + GetStringField(item, "id"));
@@ -320,7 +324,7 @@ public class SteamQueryModule(
     }
 
     [XmlFunction(FunctionMode.OneShot)]
-    [Description("查Steam社区市场物品现价：最低挂单价、中位价、近期成交量。appId可传纯数字、商店链接或缩写(csgo/dota2/tf2/pubg/rust/gta5)。要挂单全名，如 'AK-47 | Redline (Field-Tested)'；不确定磨损档就把 allWears=true，插件把五档挨个查一遍再按价格排")]
+    [Description("查Steam社区市场物品现价：最低挂单价、中位价、近期成交量，末尾附市场挂单页链接（点进去能看到历史成交，免登录接口本身取不到）。appId可传纯数字、商店链接或缩写(csgo/dota2/tf2/pubg/rust/gta5)。要挂单全名，如 'AK-47 | Redline (Field-Tested)'——磨损后缀必须带括号；不确定磨损档就把 allWears=true，插件把五档挨个查一遍再按价格排")]
     public async Task SteamMarketPrice(
         [Description("物品市场全名；allWears=true 时传不含磨损的基础名，如 'M4A1-S | Printstream'")] string item,
         [Description("游戏 appid / 商店链接 / 缩写，如 730、csgo、dota2")] string appId,
@@ -342,11 +346,12 @@ public class SteamQueryModule(
         {
             if (allWears == false)
             {
-                interactor.Poke("== " + trimmed + " (appid " + resolvedId + ") ==\n" + await DescribeMarketLine(trimmed, resolvedId));
+                interactor.Poke("== " + trimmed + " (appid " + resolvedId + ") ==\n" + await DescribeMarketLine(trimmed, resolvedId)
+                    + "\n挂单页: " + MarketListingUrl(trimmed, resolvedId));
                 return;
             }
             List<string> lines = new();
-            List<(double Price, string Name, string Text)> priced = new();
+            List<(double Price, string Wear, string Text, string MarketName)> priced = new();
             foreach (string wear in WearLevels)
             {
                 string fullName = trimmed + " (" + wear + ")";
@@ -354,14 +359,23 @@ public class SteamQueryModule(
                 double price = ParseAmount(text);
                 if (price > 0)
                 {
-                    priced.Add((price, wear, text));
+                    priced.Add((price, wear, text, fullName));
                 }
                 else
                 {
                     lines.Add(WearChinese[wear] + " (" + wear + ")：" + text);
                 }
             }
-            lines.InsertRange(0, priced.OrderBy(entry => entry.Price).Select(entry => WearChinese[entry.Name] + " (" + entry.Name + ")：" + entry.Text));
+            List<(double Price, string Wear, string Text, string MarketName)> sorted = priced.OrderBy(entry => entry.Price).ToList();
+            lines.InsertRange(0, sorted.Select(entry => WearChinese[entry.Wear] + " (" + entry.Wear + ")：" + entry.Text));
+            if (sorted.Count > 0)
+            {
+                lines.Add("挂单页（最便宜的 " + WearChinese[sorted[0].Wear] + "）: " + MarketListingUrl(sorted[0].MarketName, resolvedId));
+            }
+            else
+            {
+                lines.Add("五档都没挂单：市场全名的磨损后缀必须带括号，实测把 'AK-47 | Redline (Field-Tested)' 写成不带括号的 'AK-47 | Redline Field-Tested' 接口只回裸 {\"success\":true}");
+            }
             interactor.Poke("== " + trimmed + " 五档磨损 (appid " + resolvedId + "，货币代码 " + Configuration.Currency + ") ==\n"
                 + string.Join("\n", lines)
                 + "\n说明：实测这个接口只会回『最低挂单/中位价/成交量』三项，而且某项没有就整个字段不出现（显示为?）；只回 {\"success\":true} 表示该档当前无挂单。");
@@ -423,7 +437,7 @@ public class SteamQueryModule(
     }
 
     [XmlFunction(FunctionMode.OneShot)]
-    [Description("列Steam好友（昵称+SteamID64）。参数同 SteamProfile，可传ID64/自定义名/链接，留空用配置默认。免登录免key：实测好友主页HTML公开可抓；注意库存页就没这待遇，会被302到登录页")]
+    [Description("列Steam好友（昵称+SteamID64+在线状态；在玩的还带游戏名，游戏中/在线的排在前面，抬头给三种状态各几条）。参数同 SteamProfile，可传ID64/自定义名/链接，留空用配置默认。免登录免key：实测好友主页HTML公开可抓；注意库存页就没这待遇，会被302到登录页")]
     public async Task SteamFriends(
         [Description("SteamID64 / 自定义URL名 / 主页链接，留空用配置默认")] string steamId = "",
         [Description("最多列几条，默认30，最多100")] int limit = 30)
@@ -432,25 +446,32 @@ public class SteamQueryModule(
         {
             string id64 = await ResolveSteamIdAsync(steamId);
             string html = await FetchSteamAsync(CommunityBase + "/profiles/" + id64 + "/friends/");
-            List<(string Id, string Name)> friends = ParseFriendBlocks(html);
+            List<(string Id, string Name, string State, string Game)> friends = ParseFriendBlocks(html);
             if (friends.Count == 0)
             {
                 interactor.Poke("❌ " + id64 + " 的好友页里一条都没抓到——多半是对方把『好友列表』设成了私密，或这个号确实没好友");
                 return;
             }
             int wanted = Math.Clamp(limit, 1, 100);
+            List<(string Id, string Name, string State, string Game)> ordered = friends
+                .OrderBy(entry => entry.State switch { "游戏中" => 0, "在线" => 1, _ => 2 })
+                .ThenBy(entry => entry.Name, StringComparer.Ordinal)
+                .ToList();
             List<string> rep = new()
             {
-                "== " + id64 + " 的好友：抓到 " + friends.Count + " 条，列前 " + Math.Min(wanted, friends.Count) + " 条 =="
+                "== " + id64 + " 的好友：抓到 " + ordered.Count + " 条（游戏中 " + ordered.Count(entry => entry.State == "游戏中")
+                    + "、在线 " + ordered.Count(entry => entry.State == "在线")
+                    + "、离线 " + ordered.Count(entry => entry.State == "离线") + "），列前 " + Math.Min(wanted, ordered.Count) + " 条 =="
             };
-            foreach ((string friendId, string name) in friends.Take(wanted))
+            foreach ((string friendId, string name, string state, string game) in ordered.Take(wanted))
             {
-                rep.Add(name + " | " + friendId);
+                rep.Add(name + " | " + friendId + " | " + state + (game.Length > 0 ? " " + game : ""));
             }
-            if (friends.Count > wanted)
+            if (ordered.Count > wanted)
             {
-                rep.Add("（还有 " + (friends.Count - wanted) + " 条没列，把 limit 调大）");
+                rep.Add("（还有 " + (ordered.Count - wanted) + " 条没列，把 limit 调大）");
             }
+            rep.Add("状态取自好友页每条的 persona 类名，实测只有 in-game/online/offline 三种，正在玩的游戏名在同一条的 friend_game_link 里；『忙碌/离开/休眠/想玩』那种细分状态免登录页面给不了，要那套得走带 key 的 GetPlayerSummaries");
             interactor.Poke(string.Join("\n", rep));
         }
         catch (Exception queryError)
@@ -616,9 +637,9 @@ public class SteamQueryModule(
         return double.TryParse(digits, NumberStyles.Float, CultureInfo.InvariantCulture, out double parsed) ? parsed : 0;
     }
 
-    static List<(string Id, string Name)> ParseFriendBlocks(string html)
+    static List<(string Id, string Name, string State, string Game)> ParseFriendBlocks(string html)
     {
-        List<(string Id, string Name)> friends = new();
+        List<(string Id, string Name, string State, string Game)> friends = new();
         HashSet<string> seen = new();
         foreach (string block in html.Split("friend_block_v2").Skip(1))
         {
@@ -629,10 +650,70 @@ public class SteamQueryModule(
             }
             Match nameMatch = Regex.Match(block, "friend_block_content\"[^>]*>\\s*(?:<[^>]+>\\s*)*([^<\r\n]+)");
             string name = WebUtility.HtmlDecode(nameMatch.Success ? nameMatch.Groups[1].Value.Trim() : "");
-            friends.Add((idMatch.Groups[1].Value, name.Length > 0 ? name : "（无昵称）"));
+            Match personaMatch = Regex.Match(block, @"^\s*persona\s+([A-Za-z\-]+)");
+            string state = personaMatch.Success ? personaMatch.Groups[1].Value.ToLowerInvariant() switch
+            {
+                "online" => "在线",
+                "offline" => "离线",
+                "in-game" => "游戏中",
+                string other => other
+            } : "未知";
+            Match gameMatch = Regex.Match(block, "friend_game_link\"[^>]*>([^<]+)");
+            string game = WebUtility.HtmlDecode(gameMatch.Success ? gameMatch.Groups[1].Value.Trim() : "");
+            friends.Add((idMatch.Groups[1].Value, name.Length > 0 ? name : "（无昵称）", state, state == "游戏中" ? game : ""));
         }
         return friends;
     }
+
+    // 实测 market/listings 这条链接带括号的原样名字会被302到物品ID形式，跟随后200，所以直接把编码后的全名拼出来给用户点
+    static string MarketListingUrl(string marketName, string appId) =>
+        CommunityBase + "/market/listings/" + appId + "/" + Uri.EscapeDataString(marketName);
+
+    static readonly Dictionary<string, string> CurrencySymbols = new(StringComparer.OrdinalIgnoreCase)
+    {
+        ["CNY"] = "¥", ["USD"] = "$", ["EUR"] = "€", ["GBP"] = "£", ["JPY"] = "¥",
+        ["RUB"] = "₽", ["HKD"] = "HK$", ["TWD"] = "NT$", ["KRW"] = "₩", ["SGD"] = "S$",
+        ["AUD"] = "A$", ["CAD"] = "C$", ["BRL"] = "R$", ["INR"] = "₹", ["PLN"] = "zł",
+        ["TRY"] = "₺", ["MXN"] = "MX$", ["SEK"] = "kr", ["NOK"] = "kr", ["DKK"] = "kr",
+        ["CZK"] = "Kč", ["CHF"] = "CHF ", ["ILS"] = "₪", ["THB"] = "฿", ["VND"] = "₫",
+        ["UAH"] = "₴", ["ARS"] = "ARS$", ["COP"] = "COL$", ["CLP"] = "CLP$", ["IDR"] = "Rp",
+        ["MYR"] = "RM", ["PHP"] = "₱"
+    };
+
+    // 实测 appdetails 的 price_overview 有 final_formatted/discount_percent，
+    // storesearch 的 price 只有 {currency,initial,final}（单位是分）且没有 final_formatted——读那个字段会一律得到空串
+    static string FormatPrice(JsonElement priceElement)
+    {
+        string formatted = GetStringField(priceElement, "final_formatted");
+        long final = GetLongField(priceElement, "final");
+        long initial = GetLongField(priceElement, "initial");
+        int discount = (int)GetLongField(priceElement, "discount_percent");
+        if (formatted.Length > 0)
+        {
+            string original = GetStringField(priceElement, "initial_formatted");
+            if (discount > 0 && original.Length > 0)
+            {
+                return formatted + "（原价 " + original + "，-" + discount + "%）";
+            }
+            return discount > 0 ? formatted + "（-" + discount + "%）" : formatted;
+        }
+        if (final <= 0)
+        {
+            return "免费";
+        }
+        string currency = GetStringField(priceElement, "currency");
+        string symbol = CurrencySymbols.TryGetValue(currency, out string? found) ? found : (currency.Length > 0 ? currency + " " : "");
+        string price = symbol + ToAmount(final);
+        if (discount > 0)
+        {
+            return price + "（原价 " + symbol + ToAmount(initial) + "，-" + discount + "%）";
+        }
+        return initial > final
+            ? price + "（原价 " + symbol + ToAmount(initial) + "）"
+            : price;
+    }
+
+    static string ToAmount(long cents) => (cents / 100m).ToString("0.00", CultureInfo.InvariantCulture);
 
     async Task<string> ResolveSteamIdAsync(string input)
     {
@@ -718,7 +799,7 @@ public class SteamQueryModule(
 
     async Task<string> FetchSteamAsync(string url)
     {
-        int ttl = Math.Clamp(Configuration.CacheTtlSeconds, 0, 3600);
+        int ttl = Math.Clamp(Configuration.CacheTtlSeconds, 0, 86400);
         if (ttl > 0 && responseCache.TryGetValue(url, out (DateTime ExpireAt, string Body) cached)
             && cached.ExpireAt > DateTime.Now)
         {
