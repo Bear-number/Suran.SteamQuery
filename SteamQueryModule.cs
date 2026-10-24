@@ -797,6 +797,16 @@ public class SteamQueryModule(
     static string LookupAbbreviation(string text) =>
         AppIdAbbreviations.TryGetValue(text.Trim(), out string? appId) ? appId : "";
 
+    /// <summary>
+    /// 跟着 302 跳到商店首页时拿回的是 HTML 文档。只认文档头，资料卡与好友页那种 <?xml 开头的正当响应不算。
+    /// </summary>
+    static bool LooksLikeHtml(string body)
+    {
+        string head = body.TrimStart();
+        return head.StartsWith("<!DOCTYPE", StringComparison.OrdinalIgnoreCase)
+            || head.StartsWith("<html", StringComparison.OrdinalIgnoreCase);
+    }
+
     async Task<string> FetchSteamAsync(string url)
     {
         int ttl = Math.Clamp(Configuration.CacheTtlSeconds, 0, 86400);
@@ -863,15 +873,6 @@ public class SteamQueryModule(
     }
 
     /// <summary>
-    /// <summary>
-    /// 跟着 302 跳到商店首页时拿回的是 HTML 文档。只认文档头，资料卡与好友页那种 <?xml 开头的正当响应不算。
-    /// </summary>
-    static bool LooksLikeHtml(string body)
-    {
-        string head = body.TrimStart();
-        return head.StartsWith("<!DOCTYPE", StringComparison.OrdinalIgnoreCase)
-            || head.StartsWith("<html", StringComparison.OrdinalIgnoreCase);
-    }
 
     static HttpClient NewHttpClient(string proxy, int timeoutSeconds)
     {
