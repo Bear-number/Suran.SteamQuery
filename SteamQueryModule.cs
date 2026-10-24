@@ -119,7 +119,7 @@ public class SteamQueryModule(
 
         try
         {
-            string body = await FetchSteamAsync(url);
+            string body = await FetchJsonAsync(url, "评测");
             using JsonDocument parsed = JsonDocument.Parse(body);
             JsonElement root = parsed.RootElement.Clone();
             JsonElement summary = root.TryGetProperty("query_summary", out JsonElement summaryElement)
@@ -183,7 +183,7 @@ public class SteamQueryModule(
         string url = StoreBase + "/api/appdetails?appids=" + string.Join(",", ids) + "&l=schinese&cc=CN";
         try
         {
-            string body = await FetchSteamAsync(url);
+            string body = await FetchJsonAsync(url, "游戏详情");
             using JsonDocument parsed = JsonDocument.Parse(body);
             JsonElement root = parsed.RootElement.Clone();
             List<string> rep = new();
@@ -250,7 +250,7 @@ public class SteamQueryModule(
         string url = StoreBase + "/api/storesearch/?term=" + Uri.EscapeDataString(trimmed) + "&l=schinese&cc=CN";
         try
         {
-            string body = await FetchSteamAsync(url);
+            string body = await FetchJsonAsync(url, "商店搜索");
             using JsonDocument parsed = JsonDocument.Parse(body);
             JsonElement root = parsed.RootElement.Clone();
             if (root.TryGetProperty("items", out JsonElement items) == false || items.ValueKind != JsonValueKind.Array || items.GetArrayLength() == 0)
@@ -508,7 +508,7 @@ public class SteamQueryModule(
             }
             string url = ApiBase + "/IPlayerService/GetOwnedGames/v1/?key=" + Uri.EscapeDataString(key)
                 + "&steamid=" + id64 + "&include_played_free_games=1&include_appinfo=1&format=json" + filter;
-            string body = await FetchSteamAsync(url);
+            string body = await FetchJsonAsync(url, "已购游戏库存");
             using JsonDocument parsed = JsonDocument.Parse(body);
             if (parsed.RootElement.TryGetProperty("response", out JsonElement response) == false
                 || response.ValueKind != JsonValueKind.Object
@@ -607,7 +607,7 @@ public class SteamQueryModule(
         string url = CommunityBase + "/market/priceoverview?appid=" + appId
             + "&currency=" + Math.Clamp(Configuration.Currency, 1, 35)
             + "&market_hash_name=" + Uri.EscapeDataString(marketName);
-        string body = await FetchSteamAsync(url);
+        string body = await FetchJsonAsync(url, "市场挂单");
         using JsonDocument parsed = JsonDocument.Parse(body);
         JsonElement root = parsed.RootElement.Clone();
         if (GetBoolField(root, "success") == false)
@@ -810,7 +810,7 @@ public class SteamQueryModule(
         string proxy = Configuration.ProxyUrl.Trim();
         if (needsCommunity && proxy.Length == 0)
         {
-            throw new Exception("这条请求走 steamcommunity.com，实测国内直连12秒超时，得在配置「网络·代理地址」里填HTTP代理（如 http://127.0.0.1:7890）；商店好评率/详情/搜索这类是直连可用的，不用代理");
+            throw new Exception("这条请求走 steamcommunity.com，实测国内直连12秒超时，得在配置「网络·代理地址」里填HTTP代理（如 http://127.0.0.1:7890）；商店接口一般直连也行，但本机 2026-10-24 实测 store.steampowered.com 直连也全超时，连不上时先配代理");
         }
         for (int attempt = 0; attempt < 2; attempt++)
         {
@@ -846,6 +846,31 @@ public class SteamQueryModule(
             }
         }
         throw new Exception("Steam接口返回空内容（已重试一次）");
+    }
+
+    /// <summary>要 JSON 的接口都走这里：Steam 会把请求 302 到商店首页（本机 2026-10-24 实测评测接口就这样），
+    /// 那种情况下直接说清回的是网页，别扔一句 JsonException 让人以为 appid 写错了。</summary>
+    async Task<string> FetchJsonAsync(string url, string what)
+    {
+        string body = await FetchSteamAsync(url);
+        if (LooksLikeHtml(body))
+        {
+            responseCache.Remove(url); // 302 到首页不是稳定事实，别让它占着缓存等 TTL 过期
+            throw new Exception(what + "接口回的是网页不是 JSON（多半被 302 转到商店首页）。换网络或过一会儿再试；"
+                + "配好「网络·代理地址」能解决连不上的那类，解决不了 Steam 侧不给数据的那类");
+        }
+        return body;
+    }
+
+    /// <summary>
+    /// <summary>
+    /// 跟着 302 跳到商店首页时拿回的是 HTML 文档。只认文档头，资料卡与好友页那种 <?xml 开头的正当响应不算。
+    /// </summary>
+    static bool LooksLikeHtml(string body)
+    {
+        string head = body.TrimStart();
+        return head.StartsWith("<!DOCTYPE", StringComparison.OrdinalIgnoreCase)
+            || head.StartsWith("<html", StringComparison.OrdinalIgnoreCase);
     }
 
     static HttpClient NewHttpClient(string proxy, int timeoutSeconds)

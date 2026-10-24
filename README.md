@@ -4,11 +4,15 @@
 Steam 查询：好评率与评测、游戏详情与价格、关键词搜索、DLC 反查本体、**社区市场现价与五档磨损比价**、**个人资料卡**、**好友列表**、**已购游戏库存**、连通性自检。移植自工作区的 `steam-game-query` 技能，并按 `kira-ai-plugin-steam-main`（KiraAI Steam 插件）把它有而这里没有的功能补齐。
 
 ## 版本
-4.1.1（对应 Alife 客户端 4.2.x）
+5.0.0（对应 Alife 客户端 5.0.x；本机 5.0.2 在役客户端已热编译装载成功）
+
+## 5.0.0 的改动
+- 版本号对齐客户端主版本（官方约定：插件版本首位应与客户端一致，`PluginSystem.IsClientCompatible` 按主版本判定）
+- 纯 HTTP 查询，未涉及外部程序与平台 API；本版只做版本对齐与在役客户端装载确认
 
 ## 依赖
 - Alife.Function.FunctionCaller
-- 外部：走 `steamcommunity.com` 的功能（市场价、资料卡、好友）需要一个 HTTP 代理；商店系（好评率、详情、搜索、本体反查）**不用代理也能用**
+- 外部：需要一个 HTTP 代理。2026-10-24 复测本机对 `store.steampowered.com`、`api.steampowered.com`、`steamcommunity.com` 直连全部超时，商店系与社区系都得走代理；**而评测（`appreviews`）即使经代理也被 302 回首页**，插件会把这句话说清而不是假报 appid 写错
 
 ## AI 函数（9 个）
 | 函数 | 说明 |
@@ -31,7 +35,7 @@ Steam 查询：好评率与评测、游戏详情与价格、关键词搜索、DL
 | ReviewLanguage | schinese | 评测列表语言：schinese=仅简中，留空=全部语言（SteamReviews 的 language 参数可临时覆盖，all=全部） |
 | RequestTimeoutSeconds | 25 | 单次请求超时。实测商店接口两三秒回，好友那种大网页经代理更久，低于10秒容易偶发失败 |
 | DetailLog | 关 | 请求调试日志 |
-| ProxyUrl | 空 | HTTP 代理，如 `http://127.0.0.1:7890`。**只有市场价/资料卡/好友这三项非要**（实测 steamcommunity.com 直连12秒超时）；填了以后商店系也一起走代理 |
+| ProxyUrl | 空 | HTTP 代理，如 `http://127.0.0.1:7890`。2026-10-24 起商店系也要（本机直连全超时）；填了以后所有请求一起走代理 |
 | CacheTtlSeconds | 300 | 同一网址在这个时长内重复查直接用缓存，0=每次真查，最长 86400（一天）。查五档磨损一次发六条，靠它省掉重复 |
 | ApiKey | 空 | Steam Web API Key，`https://steamcommunity.com/dev/apikey` 免费申请。**只有已购库存要它** |
 | SteamId | 空 | 默认 17 位 ID64，填了以后资料/好友/库存不传参数就用它 |
@@ -70,11 +74,15 @@ Steam 查询：好评率与评测、游戏详情与价格、关键词搜索、DL
 ### 4.1.1 另加的实测（2026-10-21 本机 curl + 探针复跑 222 项 0 失败）
 - `storesearch` 的 `price` 实测**只有三个键**：`{"currency":"CNY","initial":29800,"final":29800}`，单位是分，**没有 `final_formatted`**——`appdetails` 的 `price_overview` 才有这个字段（实回 `¥ 298.00`，`discount_percent` 0，`initial_formatted` 空串）。4.1.0 那版两处都读 `final_formatted`，所以搜索结果里付费游戏的价格全显示成空白
 - 免费游戏（730 这类）在 `storesearch` 里**整个 `price` 键不出现**，所以这里的文案是「无价格字段（实测免费游戏就是这样）」，不硬说成免费
-- `appreviews` 去掉随机 `client_id` 后照旧 200，`query_summary`/`voted_up` 齐全；那个参数唯一的做用是把 URL 每次都变、把缓存打穿
+- `appreviews` 去掉随机 `client_id` 后**当时**照旧 200，`query_summary`/`voted_up` 齐全；那个参数唯一的作用是把 URL 每次都变、把缓存打穿（2026-10-22 观测）。
+  **2026-10-24 复测变了**：`appreviews` 直连 000，经代理也被 302 到商店首页并回 HTML —— 于是加了 `LooksLikeHtml` 判定与 `FetchJsonAsync`：
+  回网页时明说「评测接口回的是网页不是 JSON（多半被 302 转到商店首页）」，并把这条 URL 从缓存里摘掉，不让一次 302 占住整个 TTL；
+  判定只认 `<!DOCTYPE`/`<html`，资料卡那种 `<?xml` 与好友页 HTML 的正当抓取不受影响
 - 好友页 HTML 的每条类名就是状态来源：`class="selectable friend_block_v2 persona online  "`。2026-10-15 那页抓到的样本只有 online(42)/offline(252) 两种；2026-10-21 复测同一账号是 online 60 / offline 229 / **in-game 5**，带横杠不是 `inGame`，正则得按 `[A-Za-z-]+` 取。在玩的把游戏名写在同一条的 `<span class="friend_game_link">AION 2</span>` 里，免登录也拿得到；页面里 `onlineState` 零命中，`忙碌/离开/休眠/想玩` 那几种细分态确实没有
 - `/profiles/{ID64}/friends/` 实测 302 到 `/id/{自定义名}/friends`（少个尾巴斜杠），跟随后 200、266KB——`HttpClient` 默认跟跳转所以插件侧一直没事，用 curl 复现时得加 `-L`
 - 挂单页 `market/listings/730/AK-47%20%7C%20Redline%20%28Field-Tested%29` 实测 302 跳到 `…/730/G1807209A023004`、跟随后 200；不带括号那写法（`…Redline%20Field-Tested`）的 `priceoverview` 只回裸 `{"success":true}`
 - 商店系直连本轮复测仍通（`appdetails` 200/11.5 秒、`storesearch` 200/3.1 秒、`appreviews` 200/1.3 秒）；`appdetails` 那次是掐着 12 秒关口回来的，`RequestTimeoutSeconds` 默认 25 秒的意义就在这
+- **2026-10-24 复测：本机出口对 Steam 三类域名直连全部 000**（`appdetails`、`storesearch`、`steamcommunity/SearchApps` 都是），只有经代理才 200；上面那条「商店系直连仍通」是更早的观测，现在按「一律配代理」用
 
 ## 注意事项
 - **市场价、资料卡、好友列表不填代理一定失败**，报的是「这条请求走 steamcommunity.com…得在配置「网络·代理地址」里填HTTP代理」；先用 SteamEnv 看一眼直连/经代理两行
