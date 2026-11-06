@@ -23,7 +23,7 @@ public class SteamQueryConfig
     public string ReviewLanguage { get; set; } = "schinese";
 
     [DisplayName("基础·请求超时(秒)")]
-    [Description("单次请求超时时间。实测商店详情接口两三秒就回，好友列表那种大网页经代理要更久；填低于10秒容易偶发失败")]
+    [Description("单次请求超时秒数，低于 10 秒容易偶发失败。")]
     public int RequestTimeoutSeconds { get; set; } = 25;
 
     [DisplayName("基础·详细日志")]
@@ -31,7 +31,7 @@ public class SteamQueryConfig
     public bool DetailLog { get; set; } = false;
 
     [DisplayName("网络·代理地址")]
-    [Description("HTTP代理，如 http://127.0.0.1:7890。实测 store.steampowered.com 与 api.steampowered.com 国内直连可用，但 steamcommunity.com 直连12秒超时——所以市场价格、个人资料、好友列表必须填代理才能用，其余功能不填也行")]
+    [Description("HTTP 代理地址，如 http://127.0.0.1:7890，留空直连。")]
     public string ProxyUrl { get; set; } = "";
 
     [DisplayName("网络·缓存时长(秒)")]
@@ -39,7 +39,7 @@ public class SteamQueryConfig
     public int CacheTtlSeconds { get; set; } = 300;
 
     [DisplayName("凭据·Steam Web API Key")]
-    [Description("在 https://steamcommunity.com/dev/apikey 免费申请。只有『已购游戏列表』非要它不可：实测不带key时 GetOwnedGames 回401 Unauthorized，库存网页 /games/?tab=all 被302到登录页，没有免登录路子。资料卡与好友列表不用key")]
+    [Description("Steam Web API Key，已购游戏列表需要它。")]
     public string ApiKey { get; set; } = "";
 
     [DisplayName("凭据·默认SteamID64")]
@@ -53,7 +53,8 @@ public class SteamQueryConfig
 
 [Module("Steam游戏查询",
     "查询Steam：好评率与评测统计、游戏详情与价格、关键词搜索、DLC反查本体、社区市场物品现价与五档磨损比价、个人资料卡、好友列表、已购游戏库存、连通性自检。商店与市场接口全公开，资料卡和好友也免登录免key，只有已购游戏库存需要一把免费申请的Steam Web API Key",
-    defaultCategory: "苏染的工具")]
+    defaultCategory: "苏染的工具",
+    EditorUI = typeof(SteamQueryUI))]
 public class SteamQueryModule(
     XmlFunctionCaller functionCaller,
     ILogger<SteamQueryModule> logger,
