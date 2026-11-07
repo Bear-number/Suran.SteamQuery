@@ -1,7 +1,9 @@
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.ComponentModel;
 using System.Globalization;
+using System.IO;
 using System.Linq;
 using System.Net;
 using System.Net.Http;
@@ -53,7 +55,7 @@ public class SteamQueryConfig
 
 [Module("Steam游戏查询",
     "查询Steam：好评率与评测统计、游戏详情与价格、关键词搜索、DLC反查本体、社区市场物品现价与五档磨损比价、个人资料卡、好友列表、已购游戏库存、连通性自检。商店与市场接口全公开，资料卡和好友也免登录免key，只有已购游戏库存需要一把免费申请的Steam Web API Key",
-    defaultCategory: "苏染的工具",
+    defaultCategory: "苏染的工具/效率工具",
     EditorUI = typeof(SteamQueryUI))]
 public class SteamQueryModule(
     XmlFunctionCaller functionCaller,
@@ -87,7 +89,8 @@ public class SteamQueryModule(
         ["Well-Worn"] = "破损", ["Battle-Scarred"] = "战痕累累"
     };
 
-    readonly Dictionary<string, (DateTime ExpireAt, string Body)> responseCache = new();
+    // 多个群同时查同一批游戏时这里会被并发读写，普通 Dictionary 会坏
+    readonly ConcurrentDictionary<string, (DateTime ExpireAt, string Body)> responseCache = new();
 
     protected override Task OnAwake()
     {
@@ -108,6 +111,11 @@ public class SteamQueryModule(
         [Description("评测语言过滤，留空用插件配置（默认仅简体中文），all=全部语言")] string? language = null)
     {
         string resolvedId = ResolveAppId(appId);
+        if (resolvedId.Length == 0)
+        {
+            interactor.Poke("❌ 没认出 appid：传纯数字、商店链接，或 csgo/dota2/tf2/pubg/rust/gta5 这类缩写");
+            return;
+        }
         int reviewCount = Math.Clamp(count, 1, 50);
         string reviewLanguage = (language ?? Configuration.ReviewLanguage).Trim();
         if (reviewLanguage == "all")
@@ -151,10 +159,11 @@ public class SteamQueryModule(
                     string author = "";
                     if (review.TryGetProperty("author", out JsonElement authorElement) && authorElement.ValueKind == JsonValueKind.Object)
                     {
-                        author = GetStringField(authorElement, "personaname");
+                        author = SafeText(GetStringField(authorElement, "personaname"), 40);
                     }
-                    string content = GetStringField(review, "review").Trim();
-                    rep.Add("[" + tag + " " + date + "] " + author + ": " + (content.Length > 600 ? content[..600] : content));
+                    // 评测正文来自玩家，统一压单行并限长后再进上下文
+                    string content = SafeText(GetStringField(review, "review"), 600);
+                    rep.Add("[" + tag + " " + date + "] " + author + ": " + content);
                 }
             }
             interactor.Poke(string.Join("\n", rep));
@@ -284,6 +293,11 @@ public class SteamQueryModule(
         [Description("appid或商店链接")] string appId)
     {
         string resolvedId = ResolveAppId(appId);
+        if (resolvedId.Length == 0)
+        {
+            interactor.Poke("❌ 没认出 appid：传纯数字、商店链接，或 csgo/dota2/tf2/pubg/rust/gta5 这类缩写");
+            return;
+        }
         string url = StoreBase + "/app/" + resolvedId + "/";
         try
         {
@@ -403,29 +417,29 @@ public class SteamQueryModule(
             }
             List<string> rep = new()
             {
-                "== " + XmlValue(xml, "steamID") + " (" + XmlValue(xml, "steamID64") + ") ==",
-                "状态: " + XmlValue(xml, "onlineState") + " / " + XmlValue(xml, "stateMessage")
-                    + " | 可见性: " + XmlValue(xml, "privacyState") + "(visibilityState " + XmlValue(xml, "visibilityState") + ")",
-                "自定义URL: " + XmlValue(xml, "customURL") + " | 注册: " + XmlValue(xml, "memberSince")
-                    + " | 所在地: " + XmlValue(xml, "location"),
-                "封禁: VAC=" + BanText(XmlValue(xml, "vacBanned")) + " 交易=" + XmlValue(xml, "tradeBanState")
+                "== " + SafeText(XmlValue(xml, "steamID"), 80) + " (" + XmlValue(xml, "steamID64") + ") ==",
+                "状态: " + SafeText(XmlValue(xml, "onlineState"), 40) + " / " + SafeText(XmlValue(xml, "stateMessage"), 100)
+                    + " | 可见性: " + SafeText(XmlValue(xml, "privacyState"), 40) + "(visibilityState " + SafeText(XmlValue(xml, "visibilityState"), 20) + ")",
+                "自定义URL: " + SafeText(XmlValue(xml, "customURL"), 80) + " | 注册: " + SafeText(XmlValue(xml, "memberSince"), 40)
+                    + " | 所在地: " + SafeText(XmlValue(xml, "location"), 60),
+                "封禁: VAC=" + BanText(XmlValue(xml, "vacBanned")) + " 交易=" + SafeText(XmlValue(xml, "tradeBanState"), 40)
                     + " 受限账号=" + BanText(XmlValue(xml, "isLimitedAccount")),
-                "两周游玩: " + XmlValue(xml, "hoursPlayed2Wk") + " 小时 | 头像: " + XmlValue(xml, "avatarFull")
+                "两周游玩: " + SafeText(XmlValue(xml, "hoursPlayed2Wk"), 40) + " 小时 | 头像: " + SafeText(XmlValue(xml, "avatarFull"), 300)
             };
-            string headline = XmlValue(xml, "headline");
+            string headline = SafeText(XmlValue(xml, "headline"), 100);
             if (headline.Length > 0)
             {
                 rep.Add("标题: " + headline);
             }
-            string realName = XmlValue(xml, "realname");
+            string realName = SafeText(XmlValue(xml, "realname"), 60);
             if (realName.Length > 0)
             {
                 rep.Add("真名: " + realName);
             }
-            string summary = XmlValue(xml, "summary");
+            string summary = SafeText(XmlValue(xml, "summary"), 200);
             if (summary.Length > 0)
             {
-                rep.Add("签名: " + Shorten(summary, 200));
+                rep.Add("签名: " + summary);
             }
             string id64 = XmlValue(xml, "steamID64");
             rep.Add("好友列表用 SteamFriends(\"" + id64 + "\")，已购库存用 SteamOwnedGames(\"" + id64 + "\")（后者要 API Key）");
@@ -466,7 +480,8 @@ public class SteamQueryModule(
             };
             foreach ((string friendId, string name, string state, string game) in ordered.Take(wanted))
             {
-                rep.Add(name + " | " + friendId + " | " + state + (game.Length > 0 ? " " + game : ""));
+                rep.Add(SafeText(name, 40) + " | " + friendId + " | " + state
+                    + (game.Length > 0 ? " " + SafeText(game, 60) : ""));
             }
             if (ordered.Count > wanted)
             {
@@ -571,9 +586,11 @@ public class SteamQueryModule(
         }
         rep.Add("api 开放接口 直连: " + await ProbeAsync(ApiBase + "/ISteamUser/GetPlayerBans/v1/?steamids=76561197960435530", "")
             + "（不带key回400=域名是通的）");
+        // 直连永远测：没填代理的人正是最需要看到“community 直连不通”这条证据的
+        rep.Add("community 资料接口 直连: " + await ProbeAsync(CommunityBase + "/profiles/76561197960435530/?xml=1", ""));
+        rep.Add("market 市场接口 直连: " + await ProbeAsync(CommunityBase + "/market/priceoverview?appid=730&currency=23&market_hash_name=x", ""));
         if (proxy.Length > 0)
         {
-            rep.Add("community 资料接口 直连: " + await ProbeAsync(CommunityBase + "/profiles/76561197960435530/?xml=1", ""));
             rep.Add("community 资料接口 经代理: " + await ProbeAsync(CommunityBase + "/profiles/76561197960435530/?xml=1", proxy));
             rep.Add("market 市场接口 经代理: " + await ProbeAsync(CommunityBase + "/market/priceoverview?appid=730&currency=23&market_hash_name=x", proxy));
         }
@@ -781,7 +798,7 @@ public class SteamQueryModule(
         {
             return trimmed;
         }
-        Match match = Regex.Match(trimmed, @"store\.steampowered\.com/app/([0-9]+)");
+        Match match = Regex.Match(trimmed, @"(?:store\.steampowered\.com|steamcommunity\.com)/app/([0-9]+)");
         if (match.Success)
         {
             return match.Groups[1].Value;
@@ -791,8 +808,8 @@ public class SteamQueryModule(
         {
             return abbreviation;
         }
-        Match anyDigits = Regex.Match(trimmed, "[0-9]{3,}");
-        return anyDigits.Success ? anyDigits.Value : "";
+        // 不再从任意文本里抓 3 位以上数字：那样「Half-Life 2 1234」会被解析成 1234，宁可直接报错
+        return "";
     }
 
     static string LookupAbbreviation(string text) =>
@@ -807,6 +824,9 @@ public class SteamQueryModule(
         return head.StartsWith("<!DOCTYPE", StringComparison.OrdinalIgnoreCase)
             || head.StartsWith("<html", StringComparison.OrdinalIgnoreCase);
     }
+
+    /// <summary>明确值得重试的状态：限流或服务端临时不可用。</summary>
+    sealed class RetryableSteamException(string message) : Exception(message);
 
     async Task<string> FetchSteamAsync(string url)
     {
@@ -823,6 +843,7 @@ public class SteamQueryModule(
         {
             throw new Exception("这条请求走 steamcommunity.com，实测国内直连12秒超时，得在配置「网络·代理地址」里填HTTP代理（如 http://127.0.0.1:7890）；商店接口一般直连也行，但本机 2026-10-24 实测 store.steampowered.com 直连也全超时，连不上时先配代理");
         }
+        int timeoutSeconds = Math.Clamp(Configuration.RequestTimeoutSeconds, 5, 120);
         for (int attempt = 0; attempt < 2; attempt++)
         {
             try
@@ -831,16 +852,21 @@ public class SteamQueryModule(
                 request.Headers.TryAddWithoutValidation("User-Agent", BrowserUserAgent);
                 request.Headers.TryAddWithoutValidation("Accept-Language", "zh-CN,zh;q=0.9");
                 request.Headers.TryAddWithoutValidation("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,application/json;q=0.8,*/*;q=0.7");
-                using CancellationTokenSource timeout = new(TimeSpan.FromSeconds(Math.Clamp(Configuration.RequestTimeoutSeconds, 5, 120)));
-                using HttpClient client = NewHttpClient(proxy, Math.Clamp(Configuration.RequestTimeoutSeconds, 5, 120));
+                using CancellationTokenSource timeout = new(TimeSpan.FromSeconds(timeoutSeconds));
+                HttpClient client = SharedHttpClient(proxy, timeoutSeconds);
                 using HttpResponseMessage response = await client.SendAsync(request, timeout.Token);
+                int status = (int)response.StatusCode;
+                if (status == 408 || status == 429 || status >= 500)
+                {
+                    throw new RetryableSteamException("Steam 回 HTTP " + status);
+                }
                 response.EnsureSuccessStatusCode();
-                string body = await response.Content.ReadAsStringAsync(timeout.Token);
+                string body = await ReadCappedStringAsync(response, timeout.Token);
                 if (body.Trim().Length > 0)
                 {
                     if (ttl > 0)
                     {
-                        TrimCache(ttl);
+                        TrimCache();
                         responseCache[url] = (DateTime.Now.AddSeconds(ttl), body);
                     }
                     return body;
@@ -849,14 +875,35 @@ public class SteamQueryModule(
             }
             catch (Exception fetchError)
             {
+                bool retryable = fetchError is RetryableSteamException
+                    || fetchError is TaskCanceledException
+                    || fetchError is IOException
+                    || (fetchError is HttpRequestException httpError && httpError.StatusCode is null);
                 LogDetail("Steam请求失败(尝试 " + (attempt + 1) + "/2)：" + fetchError.Message);
-                if (attempt == 1)
+                // 404/401/私密页重试也只是白等：只有网络抖动、限流、5xx 才值得再打一次
+                if (attempt == 1 || retryable == false)
                 {
-                    throw new Exception("Steam接口不可达（已重试一次）：" + fetchError.Message);
+                    throw new Exception("Steam接口不可达：" + fetchError.Message);
                 }
             }
         }
         throw new Exception("Steam接口返回空内容（已重试一次）");
+    }
+
+    static async Task<string> ReadCappedStringAsync(HttpResponseMessage response, CancellationToken cancellationToken)
+    {
+        const long maxBytes = 4 * 1024 * 1024;
+        long? declared = response.Content.Headers.ContentLength;
+        if (declared.HasValue && declared.Value > maxBytes)
+        {
+            throw new Exception("Steam 响应过大（" + declared.Value + " 字节），已中止");
+        }
+        byte[] bytes = await response.Content.ReadAsByteArrayAsync(cancellationToken);
+        if (bytes.Length > maxBytes)
+        {
+            throw new Exception("Steam 响应超过 4MB 上限，已中止");
+        }
+        return Encoding.UTF8.GetString(bytes);
     }
 
     /// <summary>要 JSON 的接口都走这里：Steam 会把请求 302 到商店首页（本机 2026-10-24 实测评测接口就这样），
@@ -866,41 +913,57 @@ public class SteamQueryModule(
         string body = await FetchSteamAsync(url);
         if (LooksLikeHtml(body))
         {
-            responseCache.Remove(url); // 302 到首页不是稳定事实，别让它占着缓存等 TTL 过期
+            responseCache.TryRemove(url, out _); // 302 到首页不是稳定事实，别让它占着缓存等 TTL 过期
             throw new Exception(what + "接口回的是网页不是 JSON（多半被 302 转到商店首页）。换网络或过一会儿再试；"
                 + "配好「网络·代理地址」能解决连不上的那类，解决不了 Steam 侧不给数据的那类");
         }
         return body;
     }
 
-    /// <summary>
+    // 按「代理 + 超时」复用客户端，高频查询不用每次重建连接池
+    static readonly Dictionary<string, HttpClient> httpClients = new();
 
-    static HttpClient NewHttpClient(string proxy, int timeoutSeconds)
+    static HttpClient SharedHttpClient(string proxy, int timeoutSeconds)
     {
-        HttpClientHandler handler = new();
-        if (proxy.Trim().Length > 0)
+        string key = proxy.Trim() + "|" + timeoutSeconds;
+        lock (httpClients)
         {
-            handler.UseProxy = true;
-            handler.Proxy = new WebProxy(proxy.Trim());
+            if (httpClients.TryGetValue(key, out HttpClient? existing))
+            {
+                return existing;
+            }
+            HttpClientHandler handler = new();
+            if (proxy.Trim().Length > 0)
+            {
+                handler.UseProxy = true;
+                handler.Proxy = new WebProxy(proxy.Trim());
+            }
+            HttpClient client = new(handler) { Timeout = TimeSpan.FromSeconds(timeoutSeconds) };
+            client.DefaultRequestHeaders.UserAgent.ParseAdd(BrowserUserAgent);
+            httpClients[key] = client;
+            return client;
         }
-        HttpClient client = new(handler) { Timeout = TimeSpan.FromSeconds(timeoutSeconds) };
-        client.DefaultRequestHeaders.UserAgent.ParseAdd(BrowserUserAgent);
-        return client;
     }
 
-    void TrimCache(int ttl)
+    void TrimCache()
     {
         if (responseCache.Count < CacheCap)
         {
             return;
         }
-        foreach (string stale in responseCache.Where(entry => entry.Value.ExpireAt <= DateTime.Now).Select(entry => entry.Key).ToList())
+        DateTime now = DateTime.Now;
+        foreach (string stale in responseCache.Where(entry => entry.Value.ExpireAt <= now).Select(entry => entry.Key).ToList())
         {
-            responseCache.Remove(stale);
+            responseCache.TryRemove(stale, out _);
         }
         if (responseCache.Count >= CacheCap)
         {
-            responseCache.Clear();
+            // 还超限就按过期时间从早到晚淘汰四分之一：整表清空会让下一次查询又全部打回 Steam
+            int remove = Math.Max(1, responseCache.Count / 4);
+            foreach (string key in responseCache.OrderBy(entry => entry.Value.ExpireAt).Take(remove).Select(entry => entry.Key).ToList())
+            {
+                responseCache.TryRemove(key, out _);
+            }
         }
     }
 
@@ -908,7 +971,7 @@ public class SteamQueryModule(
     {
         try
         {
-            using HttpClient client = NewHttpClient(proxy, ProbeTimeoutSeconds);
+            HttpClient client = SharedHttpClient(proxy, ProbeTimeoutSeconds);
             using HttpResponseMessage response = await client.GetAsync(url, DestroyCancellationToken);
             return "✅ HTTP " + (int)response.StatusCode;
         }
@@ -977,6 +1040,20 @@ public class SteamQueryModule(
     {
         string single = Regex.Replace((text ?? "").Trim(), @"\s+", " ");
         return single.Length > max ? single[..max] + "…" : single;
+    }
+
+    /// <summary>外部文本进提示词前统一清洗：去标签、控制字符与双向覆盖符，压单行并限长。</summary>
+    static string SafeText(string? value, int max)
+    {
+        string text = value ?? "";
+        if (text.Length == 0)
+        {
+            return "";
+        }
+        text = Regex.Replace(text, "<[^>]*>", " ");
+        text = Regex.Replace(text, @"[\u0000-\u001F\u007F-\u009F\u200B-\u200F\u202A-\u202E\u2066-\u2069]", " ");
+        text = Regex.Replace(text, @"\s+", " ").Trim();
+        return max > 0 && text.Length > max ? text[..max] + "…" : text;
     }
 
     void LogDetail(string message)
